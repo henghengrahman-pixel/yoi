@@ -12,26 +12,26 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
   .filter(Boolean);
 
 const MEMORY_FILE = './memory.json';
-let userMemory = {};
+let store = {};
 
 if (fs.existsSync(MEMORY_FILE)) {
   try {
-    userMemory = JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
+    store = JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
   } catch {
-    userMemory = {};
+    store = {};
   }
 }
 
-function saveMemory() {
-  fs.writeFileSync(MEMORY_FILE, JSON.stringify(userMemory, null, 2));
+function saveStore() {
+  fs.writeFileSync(MEMORY_FILE, JSON.stringify(store, null, 2));
 }
 
-function ensureUserMemory(userId) {
-  if (!userMemory[userId]) {
-    userMemory[userId] = {
+function ensureUser(userId) {
+  if (!store[userId]) {
+    store[userId] = {
       messages: [],
-      chartText: '',
-      parsedChart: null
+      lastChart: null,
+      lastChartSource: null
     };
   }
 }
@@ -43,17 +43,19 @@ function normalizeText(text) {
     .trim();
 }
 
-function parseSizeChart(text) {
+function parseChartFromText(text) {
   const raw = normalizeText(text);
   if (!raw) return null;
 
-  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  const lines = raw.split('\n').map((x) => x.trim()).filter(Boolean);
 
   const chart = {
     S: null,
     M: null,
     L: null,
-    XL: null
+    XL: null,
+    XXL: null,
+    XXXL: null
   };
 
   for (const line of lines) {
@@ -64,6 +66,8 @@ function parseSizeChart(text) {
     else if (/size\s*m\b/i.test(lower)) key = 'M';
     else if (/size\s*l\b/i.test(lower)) key = 'L';
     else if (/size\s*xl\b/i.test(lower)) key = 'XL';
+    else if (/size\s*xxl\b/i.test(lower)) key = 'XXL';
+    else if (/size\s*xxxl\b/i.test(lower)) key = 'XXXL';
 
     if (!key) continue;
 
@@ -73,49 +77,101 @@ function parseSizeChart(text) {
     }
   }
 
-  if (!chart.S && !chart.M && !chart.L && !chart.XL) return null;
-  return chart;
+  const hasAny = Object.values(chart).some((v) => typeof v === 'number' && !Number.isNaN(v));
+  return hasAny ? chart : null;
+}
+
+async function parseChartFromImage(fileUrl, note = '') {
+  const res = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: `
+Kamu membaca size chart pakaian dari gambar.
+
+Tugas:
+- Ambil WIDTH / lebar dada tiap size jika terlihat jelas.
+- Jangan menebak kalau tidak jelas.
+- Kalau tidak jelas, isi null.
+- Tentukan fit_type berdasarkan width size S:
+  - S >= 56 => "oversize"
+  - S 54-55.99 => "semi-oversize"
+  - S < 54 => "regular"
+
+Balas HANYA JSON valid:
+{
+  "chart_found": true,
+  "fit_type": "oversize",
+  "reason": "size S width 57 cm",
+  "sizes": {
+    "S": 57,
+    "M": 59,
+    "L": 61,
+    "XL": 62,
+    "XXL": null,
+    "XXXL": null
+  }
+}
+`
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: note || 'Baca size chart pada gambar ini dan ambil ukuran width/lebar dada tiap size.'
+          },
+          {
+            type: 'image_url',
+            image_url: { url: fileUrl }
+          }
+        ]
+      }
+    ]
+  });
+
+  try {
+    return JSON.parse(res.choices?.[0]?.message?.content || '{}');
+  } catch {
+    return null;
+  }
 }
 
 function detectFitType(chart) {
   if (!chart || !chart.S) return null;
-
-  // Patokan sederhana:
-  // regular fit S umumnya sekitar 48-53
-  // 54-55 cenderung semi loose
-  // 56+ sudah oversize / loose
   if (chart.S >= 56) return 'oversize';
   if (chart.S >= 54) return 'semi-oversize';
   return 'regular';
 }
 
-function recommendSizeFromChart(weight, height, chart) {
-  const widths = [
-    { size: 'S', width: chart?.S || 57 },
-    { size: 'M', width: chart?.M || 59 },
-    { size: 'L', width: chart?.L || 61 },
-    { size: 'XL', width: chart?.XL || 62 }
-  ];
+function fitLabel(fitType) {
+  if (fitType === 'oversize') return 'oversize / loose fit';
+  if (fitType === 'semi-oversize') return 'semi-oversize';
+  if (fitType === 'regular') return 'regular fit';
+  return 'tidak diketahui';
+}
 
-  let targetWidth;
+function extractWeightHeight(text) {
+  const nums = normalizeText(text).toLowerCase().match(/\d+/g);
+  if (!nums || nums.length < 2) return null;
 
-  if (weight <= 55) targetWidth = widths[0].width;
-  else if (weight <= 65) targetWidth = widths[1].width || widths[0].width;
-  else if (weight <= 75) targetWidth = widths[2].width || widths[1].width;
-  else targetWidth = widths[3].width || widths[2].width;
+  let a = parseInt(nums[0], 10);
+  let b = parseInt(nums[1], 10);
 
-  if (height >= 175) {
-    const idx = widths.findIndex((x) => x.width >= targetWidth);
-    if (idx >= 0 && idx < widths.length - 1) {
-      return widths[idx + 1];
-    }
+  let weight = a;
+  let height = b;
+
+  if (a > b) {
+    weight = b;
+    height = a;
   }
 
-  for (const item of widths) {
-    if (item.width >= targetWidth) return item;
-  }
+  if (weight < 20 || weight > 250) return null;
+  if (height < 100 || height > 250) return null;
 
-  return widths[widths.length - 1];
+  return { weight, height };
 }
 
 function looksLikeChartText(text) {
@@ -126,7 +182,9 @@ function looksLikeChartText(text) {
     t.includes('size s:') ||
     t.includes('size m:') ||
     t.includes('size l:') ||
-    t.includes('size xl:')
+    t.includes('size xl:') ||
+    t.includes('lebar dada') ||
+    t.includes('width')
   );
 }
 
@@ -141,28 +199,34 @@ function asksFitQuestion(text) {
   );
 }
 
-function extractWeightHeight(text) {
-  const t = normalizeText(text).toLowerCase();
-  const nums = t.match(/\d+/g);
-  if (!nums || nums.length < 2) return null;
+function recommendSize(weight, height, chart) {
+  const sizes = [
+    { size: 'S', width: chart?.S },
+    { size: 'M', width: chart?.M },
+    { size: 'L', width: chart?.L },
+    { size: 'XL', width: chart?.XL },
+    { size: 'XXL', width: chart?.XXL },
+    { size: 'XXXL', width: chart?.XXXL }
+  ].filter((x) => typeof x.width === 'number');
 
-  let a = parseInt(nums[0], 10);
-  let b = parseInt(nums[1], 10);
+  if (!sizes.length) return null;
 
-  // cari mana BB mana TB
-  let weight = a;
-  let height = b;
+  let targetIndex = 0;
 
-  if (a > b) {
-    weight = b;
-    height = a;
+  if (weight <= 55) targetIndex = 0;
+  else if (weight <= 65) targetIndex = 1;
+  else if (weight <= 75) targetIndex = 2;
+  else if (weight <= 90) targetIndex = 3;
+  else if (weight <= 105) targetIndex = 4;
+  else targetIndex = 5;
+
+  if (targetIndex > sizes.length - 1) targetIndex = sizes.length - 1;
+
+  if (height >= 175 && targetIndex < sizes.length - 1) {
+    targetIndex += 1;
   }
 
-  // validasi sederhana
-  if (weight < 20 || weight > 250) return null;
-  if (height < 100 || height > 250) return null;
-
-  return { weight, height };
+  return sizes[targetIndex] || sizes[sizes.length - 1];
 }
 
 bot.on('message', async (msg) => {
@@ -170,117 +234,120 @@ bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = String(msg.from?.id || '');
     const textRaw = normalizeText(msg.text || msg.caption || '');
-    const text = textRaw.toLowerCase();
+    const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : null;
 
     if (ADMIN_IDS.length && !ADMIN_IDS.includes(userId)) {
       return bot.sendMessage(chatId, '🔒 Bot private');
     }
 
-    ensureUserMemory(userId);
+    ensureUser(userId);
 
-    if (text === '/start') {
-      userMemory[userId] = {
+    if (textRaw.toLowerCase() === '/start') {
+      store[userId] = {
         messages: [],
-        chartText: '',
-        parsedChart: null
+        lastChart: null,
+        lastChartSource: null
       };
-      saveMemory();
+      saveStore();
       return bot.sendMessage(chatId, '♻️ Chat direset');
     }
 
-    if (!textRaw) {
-      return bot.sendMessage(chatId, '❗ Kirim pesan ya');
+    if (!textRaw && !photo) {
+      return bot.sendMessage(chatId, '❗ Kirim teks atau gambar size chart');
     }
 
-    // 1) simpan chart kalau ada
-    const chartFound = looksLikeChartText(textRaw) ? parseSizeChart(textRaw) : null;
-    if (chartFound) {
-      userMemory[userId].chartText = textRaw;
-      userMemory[userId].parsedChart = chartFound;
-      saveMemory();
+    const loading = await bot.sendMessage(chatId, '⏳ Lagi proses...');
+
+    let parsedChart = null;
+
+    // 1) Chart dari teks
+    if (textRaw && looksLikeChartText(textRaw)) {
+      parsedChart = parseChartFromText(textRaw);
     }
 
-    const chart = userMemory[userId].parsedChart;
+    // 2) Chart dari gambar
+    if (!parsedChart && photo) {
+      const file = await bot.getFile(photo.file_id);
+      const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+
+      const imageResult = await parseChartFromImage(fileUrl, textRaw);
+
+      if (imageResult?.chart_found && imageResult?.sizes) {
+        parsedChart = imageResult.sizes;
+      }
+    }
+
+    // simpan chart kalau berhasil kebaca
+    if (parsedChart) {
+      store[userId].lastChart = parsedChart;
+      store[userId].lastChartSource = textRaw || '[image chart]';
+      saveStore();
+    }
+
+    const chart = store[userId].lastChart;
     const fitType = detectFitType(chart);
 
-    // 2) kalau dalam pesan yang sama ada pertanyaan fit
-    if (asksFitQuestion(textRaw) && chart) {
-      if (fitType === 'oversize') {
-        return bot.sendMessage(
-          chatId,
-          'Dari size chart ini, modelnya cenderung oversize / loose fit, bukan regular. Soalnya size S saja sudah lebar 57 cm.'
-        );
-      }
+    // 3) tanya fit
+    if (asksFitQuestion(textRaw)) {
+      try { await bot.deleteMessage(chatId, loading.message_id); } catch {}
 
-      if (fitType === 'semi-oversize') {
-        return bot.sendMessage(
-          chatId,
-          'Dari size chart ini, modelnya cenderung semi-oversize, bukan slim fit.'
-        );
+      if (!chart) {
+        return bot.sendMessage(chatId, '❌ Size chart belum kebaca. Kirim ulang chart yang lebih jelas atau tulis chart dalam teks.');
       }
 
       return bot.sendMessage(
         chatId,
-        'Dari size chart ini, modelnya cenderung regular fit.'
+        `Dari size chart ini, modelnya cenderung ${fitLabel(fitType)}.` +
+        (chart?.S ? ` Size S lebarnya ${chart.S} cm.` : '')
       );
     }
 
-    // 3) kalau ada pertanyaan BB/TB dan chart sudah tersimpan
+    // 4) tanya BB/TB
     const wh = extractWeightHeight(textRaw);
-    if (wh && chart) {
-      const result = recommendSizeFromChart(wh.weight, wh.height, chart);
+    if (wh) {
+      try { await bot.deleteMessage(chatId, loading.message_id); } catch {}
 
-      let note = '';
-      if (fitType === 'oversize') {
-        note = '\nCatatan: chart ini cenderung oversize / loose fit.';
-      } else if (fitType === 'semi-oversize') {
-        note = '\nCatatan: chart ini cenderung semi-oversize.';
+      if (!chart) {
+        return bot.sendMessage(chatId, '❌ Saya belum punya size chart yang valid. Kirim chart dulu ya, teks atau gambar.');
+      }
+
+      const sizeResult = recommendSize(wh.weight, wh.height, chart);
+
+      if (!sizeResult) {
+        return bot.sendMessage(chatId, '❌ Size chart kebaca, tapi data ukurannya belum cukup.');
       }
 
       return bot.sendMessage(
         chatId,
-        `BB ${wh.weight}kg TB ${wh.height}cm → cocok size ${result.size}\nLebar dada size ${result.size}: ${result.width}cm${note}`
+        `BB ${wh.weight}kg TB ${wh.height}cm → cocok size ${sizeResult.size}\n` +
+        `Lebar dada size ${sizeResult.size}: ${sizeResult.width} cm\n` +
+        `Catatan: chart ini cenderung ${fitLabel(fitType)}.`
       );
     }
 
-    // 4) kalau user cuma kirim chart tanpa tanya apa-apa
-    if (chartFound && !asksFitQuestion(textRaw) && !wh) {
-      if (fitType === 'oversize') {
-        return bot.sendMessage(
-          chatId,
-          '✅ Size chart disimpan.\nChart ini cenderung oversize / loose fit.'
-        );
-      }
-
-      if (fitType === 'semi-oversize') {
-        return bot.sendMessage(
-          chatId,
-          '✅ Size chart disimpan.\nChart ini cenderung semi-oversize.'
-        );
-      }
+    // 5) user cuma kirim chart
+    if (parsedChart) {
+      try { await bot.deleteMessage(chatId, loading.message_id); } catch {}
 
       return bot.sendMessage(
         chatId,
-        '✅ Size chart disimpan.\nChart ini cenderung regular fit.'
-      );
-    }
-
-    // 5) kalau tanya fit tapi chart belum ada
-    if (asksFitQuestion(textRaw) && !chart) {
-      return bot.sendMessage(
-        chatId,
-        'Kirim size chart dulu ya, biar saya cek ini oversize, regular fit, atau boxy.'
+        `✅ Size chart berhasil dibaca dan disimpan.\n` +
+        `Fit: ${fitLabel(fitType)}\n` +
+        `Data: ${Object.entries(parsedChart)
+          .filter(([, v]) => typeof v === 'number')
+          .map(([k, v]) => `${k}:${v}`)
+          .join(', ')}`
       );
     }
 
     // 6) fallback AI
-    userMemory[userId].messages.push({
+    store[userId].messages.push({
       role: 'user',
-      content: textRaw
+      content: textRaw || '[image]'
     });
 
-    if (userMemory[userId].messages.length > 10) {
-      userMemory[userId].messages.shift();
+    if (store[userId].messages.length > 12) {
+      store[userId].messages.shift();
     }
 
     const res = await openai.chat.completions.create({
@@ -288,25 +355,27 @@ bot.on('message', async (msg) => {
       messages: [
         {
           role: 'system',
-          content:
-            'Kamu admin toko baju. Jawab singkat, jelas, santai, dan fokus ke ukuran, fit baju, serta size chart.'
+          content: 'Kamu admin toko baju. Jawab singkat, santai, fokus ke ukuran, fit baju, dan size chart.'
         },
-        ...userMemory[userId].messages
+        ...store[userId].messages
       ]
     });
 
     const reply = res.choices?.[0]?.message?.content || '❌ Tidak ada respon';
 
-    userMemory[userId].messages.push({
+    store[userId].messages.push({
       role: 'assistant',
       content: reply
     });
+    saveStore();
 
-    saveMemory();
+    try { await bot.deleteMessage(chatId, loading.message_id); } catch {}
     await bot.sendMessage(chatId, reply);
 
   } catch (err) {
     console.log(err);
-    await bot.sendMessage(msg.chat.id, '❌ Error');
+    try {
+      await bot.sendMessage(msg.chat.id, '❌ Error');
+    } catch {}
   }
 });
