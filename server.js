@@ -12,7 +12,7 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
   .map(id => id.trim())
   .filter(Boolean);
 
-// MEMORY FILE
+// MEMORY
 const MEMORY_FILE = './memory.json';
 let userMemory = {};
 
@@ -51,29 +51,63 @@ bot.on('message', async (msg) => {
   try {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
-    const text = (msg.text || msg.caption || '').toLowerCase();
+    const textRaw = msg.text || msg.caption || '';
+    const text = textRaw.toLowerCase();
 
     // 🔒 ADMIN
     if (ADMIN_IDS.length && !ADMIN_IDS.includes(String(userId))) {
-      return bot.sendMessage(chatId, '🔒 Bot ini private');
+      return bot.sendMessage(chatId, '🔒 Bot private');
     }
 
     // 🔄 RESET
     if (text === '/start') {
       userMemory[userId] = [];
       saveMemory();
-      return bot.sendMessage(chatId, '♻️ Chat direset, mulai baru');
+      return bot.sendMessage(chatId, '♻️ Chat direset');
     }
 
     if (!text) return bot.sendMessage(chatId, '❗ Kirim pesan ya');
 
-    // 🔥 HANDLE SIZE (BB + TB)
+    // ==================================================
+    // 🔥 PRIORITY HANDLER (ANTI NGACO TOTAL)
+    // ==================================================
+
+    // OVERSIZE / BOXY
+    if (text.includes('oversize') || text.includes('boxy')) {
+      return bot.sendMessage(chatId,
+        'Oversize / boxy itu model lebih longgar dari ukuran normal.\n\n' +
+        '👉 Saran:\n' +
+        '- Mau pas → pakai size normal\n' +
+        '- Mau oversize → naik 1 size\n\n' +
+        'Contoh:\nXL → XXL'
+      );
+    }
+
+    // REGULAR
+    if (text.includes('regular')) {
+      return bot.sendMessage(chatId,
+        'Regular fit itu ukuran normal (tidak ketat & tidak longgar).\n' +
+        '👉 Gunakan size sesuai rekomendasi.'
+      );
+    }
+
+    // MODEL
+    if (text.includes('model')) {
+      return bot.sendMessage(chatId,
+        'Model kaos ini umumnya regular fit.\n' +
+        'Kalau mau lebih longgar, bisa pilih oversize (naik 1 size).'
+      );
+    }
+
+    // ==================================================
+    // 🔥 SIZE DETECT (AKURAT)
+    // ==================================================
     const match = text.match(/(\d+).*?(\d+)/);
+
     if (match) {
       let w = parseInt(match[1]);
       let h = parseInt(match[2]);
 
-      // auto fix kebalik
       if (w > h) [w, h] = [h, w];
 
       const result = recommendSize(w, h);
@@ -84,42 +118,26 @@ bot.on('message', async (msg) => {
       );
     }
 
-    // 🔥 HANDLE OVERSIZE (ANTI NGACO)
-    if (text.includes('oversize')) {
-      return bot.sendMessage(chatId,
-        'Oversize itu model lebih longgar dari ukuran normal.\n\n' +
-        '👉 Saran:\n' +
-        '- Mau pas → pakai size normal\n' +
-        '- Mau oversize → naik 1 size\n\n' +
-        'Contoh: XL → XXL'
-      );
-    }
-
-    // 🔥 HANDLE REGULAR
-    if (text.includes('regular')) {
-      return bot.sendMessage(chatId,
-        'Regular fit itu ukuran normal (tidak ketat & tidak longgar).\n' +
-        '👉 Gunakan size sesuai rekomendasi.'
-      );
-    }
-
-    // 🧠 MEMORY INIT
+    // ==================================================
+    // 🧠 MEMORY + AI (FALLBACK)
+    // ==================================================
     if (!userMemory[userId]) userMemory[userId] = [];
 
-    userMemory[userId].push({ role: 'user', content: text });
+    userMemory[userId].push({
+      role: 'user',
+      content: textRaw
+    });
 
-    // batasi memory
     if (userMemory[userId].length > 10) {
       userMemory[userId].shift();
     }
 
-    // 🤖 AI fallback (udah aman)
     const res = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: 'Kamu admin toko baju. Jawab singkat, santai, dan fokus ke produk & ukuran.'
+          content: 'Kamu admin toko baju. Jawab santai, singkat, dan fokus ke produk.'
         },
         ...userMemory[userId]
       ]
@@ -127,7 +145,11 @@ bot.on('message', async (msg) => {
 
     const reply = res.choices[0].message.content;
 
-    userMemory[userId].push({ role: 'assistant', content: reply });
+    userMemory[userId].push({
+      role: 'assistant',
+      content: reply
+    });
+
     saveMemory();
 
     bot.sendMessage(chatId, reply);
