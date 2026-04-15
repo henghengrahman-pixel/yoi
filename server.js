@@ -32,18 +32,49 @@ bot.on('message', async (msg) => {
       return bot.sendMessage(chatId, '🔒 Bot ini private');
     }
 
-    // kalau kosong (misal kirim gambar tanpa caption)
-    if (!text) {
-      return bot.sendMessage(chatId, '❗ Kirim pesan text ya');
+    // cek apakah ada gambar
+    const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : null;
+
+    // kalau kosong semua
+    if (!text && !photo) {
+      return bot.sendMessage(chatId, '❗ Kirim text atau gambar + pertanyaan');
     }
 
     // ⏳ loading
     const loadingMsg = await bot.sendMessage(chatId, '⏳ Lagi mikir...');
 
-    // request ke OpenAI
-    const res = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
+    let messages;
+
+    // 🔥 JIKA ADA GAMBAR → PAKAI VISION
+    if (photo) {
+      const file = await bot.getFile(photo.file_id);
+      const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+
+      messages = [
+        {
+          role: 'system',
+          content: 'Kamu ahli membaca size chart pakaian dan memberi rekomendasi ukuran yang akurat.'
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: text || 'Analisa gambar ini'
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: fileUrl
+              }
+            }
+          ]
+        }
+      ];
+    } 
+    // 🔹 JIKA TEXT SAJA
+    else {
+      messages = [
         {
           role: 'system',
           content: 'Jawab singkat, jelas, dan santai.'
@@ -52,12 +83,18 @@ bot.on('message', async (msg) => {
           role: 'user',
           content: text
         }
-      ]
+      ];
+    }
+
+    // request ke OpenAI
+    const res = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages
     });
 
     const reply = res.choices?.[0]?.message?.content || '❌ Tidak ada respon';
 
-    // hapus loading (opsional)
+    // hapus loading
     try {
       await bot.deleteMessage(chatId, loadingMsg.message_id);
     } catch (e) {}
