@@ -1,134 +1,101 @@
 require('dotenv').config();
+const fs = require('fs');
 const TelegramBot = require('node-telegram-bot-api');
 const OpenAI = require('openai');
 
-// init bot
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
-  polling: true
-});
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// init openai
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-// MULTI ADMIN
 const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
   .split(',')
   .map(id => id.trim())
   .filter(Boolean);
 
-// 🧠 MEMORY CHAT
-const userMemory = {};
+const MEMORY_FILE = './memory.json';
+let userMemory = {};
 
-// listener
+if (fs.existsSync(MEMORY_FILE)) {
+  userMemory = JSON.parse(fs.readFileSync(MEMORY_FILE));
+}
+
+function saveMemory() {
+  fs.writeFileSync(MEMORY_FILE, JSON.stringify(userMemory, null, 2));
+}
+
+function recommendSize(weight, height) {
+  const sizes = [
+    { size: 'S', width: 51, length: 70 },
+    { size: 'M', width: 54, length: 73 },
+    { size: 'L', width: 57, length: 76 },
+    { size: 'XL', width: 60, length: 79 },
+    { size: 'XXL', width: 63, length: 82 },
+    { size: 'XXXL', width: 65, length: 85 }
+  ];
+
+  let targetWidth = weight * 0.6;
+  let targetLength = height * 0.45;
+
+  for (let s of sizes) {
+    if (s.width >= targetWidth && s.length >= targetLength) {
+      return s;
+    }
+  }
+
+  return sizes[sizes.length - 1];
+}
+
 bot.on('message', async (msg) => {
   try {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
-
     const text = msg.text || msg.caption;
 
-    // 🔒 hanya admin
     if (ADMIN_IDS.length && !ADMIN_IDS.includes(String(userId))) {
-      return bot.sendMessage(chatId, '🔒 Bot ini private');
+      return bot.sendMessage(chatId, '🔒 Private bot');
     }
 
-    // 🔥 /start = reset chat
     if (text === '/start') {
-      userMemory[userId] = [
-        {
-          role: 'system',
-          content: 'Jawab singkat, jelas, dan nyambung dengan percakapan.'
-        }
-      ];
-
-      return bot.sendMessage(chatId, '♻️ Percakapan baru dimulai');
+      userMemory[userId] = [];
+      saveMemory();
+      return bot.sendMessage(chatId, '♻️ Chat direset');
     }
 
-    const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : null;
+    if (!text) return bot.sendMessage(chatId, 'Kirim text');
 
-    if (!text && !photo) {
-      return bot.sendMessage(chatId, '❗ Kirim text atau gambar + pertanyaan');
+    const match = text.match(/(\d+).*?(\d+)/);
+    if (match) {
+      let w = parseInt(match[1]);
+      let h = parseInt(match[2]);
+      if (w > h) [w, h] = [h, w];
+
+      const result = recommendSize(w, h);
+
+      return bot.sendMessage(chatId,
+        `BB ${w}kg TB ${h}cm → size ${result.size}\nWidth ${result.width}cm, Length ${result.length}cm`
+      );
     }
 
-    // ⏳ loading
-    const loadingMsg = await bot.sendMessage(chatId, '⏳ Lagi mikir...');
+    if (!userMemory[userId]) userMemory[userId] = [];
 
-    // 🧠 INIT MEMORY
-    if (!userMemory[userId]) {
-      userMemory[userId] = [
-        {
-          role: 'system',
-          content: 'Jawab singkat, jelas, dan nyambung dengan percakapan.'
-        }
-      ];
-    }
+    userMemory[userId].push({ role: 'user', content: text });
 
-    let userMessage;
-
-    // 🔥 MODE GAMBAR (VISION)
-    if (photo) {
-      const file = await bot.getFile(photo.file_id);
-      const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-
-      userMessage = {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: (text || '') + ' (gunakan data tabel di gambar, jawab langsung dan akurat)'
-          },
-          {
-            type: 'image_url',
-            image_url: { url: fileUrl }
-          }
-        ]
-      };
-    } 
-    
-    // 🔹 MODE TEXT
-    else {
-      userMessage = {
-        role: 'user',
-        content: text
-      };
-    }
-
-    // simpan ke memory
-    userMemory[userId].push(userMessage);
-
-    // batasi memory (biar ringan)
-    if (userMemory[userId].length > 12) {
-      userMemory[userId].splice(1, 2); // buang chat lama, tapi system tetap
-    }
-
-    // request ke OpenAI
     const res = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: userMemory[userId]
     });
 
-    const reply = res.choices?.[0]?.message?.content || '❌ Tidak ada respon';
+    const reply = res.choices[0].message.content;
 
-    // simpan jawaban bot
-    userMemory[userId].push({
-      role: 'assistant',
-      content: reply
-    });
+    userMemory[userId].push({ role: 'assistant', content: reply });
 
-    // hapus loading
-    try {
-      await bot.deleteMessage(chatId, loadingMsg.message_id);
-    } catch (e) {}
+    if (userMemory[userId].length > 10) userMemory[userId].shift();
 
-    await bot.sendMessage(chatId, reply);
+    saveMemory();
 
-  } catch (err) {
-    console.error('ERROR:', err.message);
+    bot.sendMessage(chatId, reply);
 
-    try {
-      bot.sendMessage(msg.chat.id, '❌ Terjadi error, coba lagi');
-    } catch (e) {}
+  } catch (e) {
+    console.log(e);
+    bot.sendMessage(msg.chat.id, 'Error');
   }
 });
