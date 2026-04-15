@@ -18,6 +18,9 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
   .map(id => id.trim())
   .filter(Boolean);
 
+// 🧠 MEMORY CHAT
+const userMemory = {};
+
 // listener
 bot.on('message', async (msg) => {
   try {
@@ -31,80 +34,88 @@ bot.on('message', async (msg) => {
       return bot.sendMessage(chatId, '🔒 Bot ini private');
     }
 
+    // 🔥 /start = reset chat
+    if (text === '/start') {
+      userMemory[userId] = [
+        {
+          role: 'system',
+          content: 'Jawab singkat, jelas, dan nyambung dengan percakapan.'
+        }
+      ];
+
+      return bot.sendMessage(chatId, '♻️ Percakapan baru dimulai');
+    }
+
     const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : null;
 
     if (!text && !photo) {
       return bot.sendMessage(chatId, '❗ Kirim text atau gambar + pertanyaan');
     }
 
-    // loading
+    // ⏳ loading
     const loadingMsg = await bot.sendMessage(chatId, '⏳ Lagi mikir...');
 
-    let messages;
+    // 🧠 INIT MEMORY
+    if (!userMemory[userId]) {
+      userMemory[userId] = [
+        {
+          role: 'system',
+          content: 'Jawab singkat, jelas, dan nyambung dengan percakapan.'
+        }
+      ];
+    }
+
+    let userMessage;
 
     // 🔥 MODE GAMBAR (VISION)
     if (photo) {
       const file = await bot.getFile(photo.file_id);
       const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
 
-      messages = [
-        {
-          role: 'system',
-          content: `
-Kamu adalah ahli size chart pakaian.
-
-TUGAS:
-- WAJIB baca tabel ukuran di gambar
-- Fokus ke angka (width, length, dll)
-- Jangan kasih teori umum
-
-ATURAN:
-- Jawaban singkat & langsung
-- Sebutkan size paling cocok (XL, XXL, dll)
-- Jelaskan singkat pakai data dari tabel
-- Jangan ngelantur
-
-Contoh:
-"BB 100kg tinggi 170cm cocok XXL karena width 63cm dan length 82cm lebih longgar dan aman."
-`
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: (text || '') + ' (gunakan data tabel di gambar, jangan asal jawab)'
-            },
-            {
-              type: 'image_url',
-              image_url: { url: fileUrl }
-            }
-          ]
-        }
-      ];
+      userMessage = {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: (text || '') + ' (gunakan data tabel di gambar, jawab langsung dan akurat)'
+          },
+          {
+            type: 'image_url',
+            image_url: { url: fileUrl }
+          }
+        ]
+      };
     } 
     
     // 🔹 MODE TEXT
     else {
-      messages = [
-        {
-          role: 'system',
-          content: 'Jawab singkat, jelas, dan langsung ke poin.'
-        },
-        {
-          role: 'user',
-          content: text
-        }
-      ];
+      userMessage = {
+        role: 'user',
+        content: text
+      };
+    }
+
+    // simpan ke memory
+    userMemory[userId].push(userMessage);
+
+    // batasi memory (biar ringan)
+    if (userMemory[userId].length > 12) {
+      userMemory[userId].splice(1, 2); // buang chat lama, tapi system tetap
     }
 
     // request ke OpenAI
     const res = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
-      messages
+      messages: userMemory[userId]
     });
 
     const reply = res.choices?.[0]?.message?.content || '❌ Tidak ada respon';
+
+    // simpan jawaban bot
+    userMemory[userId].push({
+      role: 'assistant',
+      content: reply
+    });
 
     // hapus loading
     try {
