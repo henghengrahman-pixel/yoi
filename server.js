@@ -47,6 +47,16 @@ function recommendSize(weight, height) {
   return sizes[sizes.length - 1];
 }
 
+// 🔥 AMBIL CONTEXT TERAKHIR
+function getLastContext(userId) {
+  if (!userMemory[userId]) return '';
+  return userMemory[userId]
+    .slice(-3)
+    .map(m => m.content)
+    .join(' ')
+    .toLowerCase();
+}
+
 bot.on('message', async (msg) => {
   try {
     const chatId = msg.chat.id;
@@ -54,12 +64,12 @@ bot.on('message', async (msg) => {
     const textRaw = msg.text || msg.caption || '';
     const text = textRaw.toLowerCase();
 
-    // 🔒 ADMIN
+    // ADMIN
     if (ADMIN_IDS.length && !ADMIN_IDS.includes(String(userId))) {
       return bot.sendMessage(chatId, '🔒 Bot private');
     }
 
-    // 🔄 RESET
+    // RESET
     if (text === '/start') {
       userMemory[userId] = [];
       saveMemory();
@@ -68,39 +78,42 @@ bot.on('message', async (msg) => {
 
     if (!text) return bot.sendMessage(chatId, '❗ Kirim pesan ya');
 
+    const lastContext = getLastContext(userId);
+
     // ==================================================
-    // 🔥 PRIORITY HANDLER (ANTI NGACO TOTAL)
+    // 🔥 CONTEXT AWARE HANDLER (FIX UTAMA)
     // ==================================================
 
-    // OVERSIZE / BOXY
-    if (text.includes('oversize') || text.includes('boxy')) {
+    // MODEL / OVERSIZE
+    if (text.includes('oversize') || text.includes('boxy') || text.includes('model')) {
+
+      // 👉 kalau sebelumnya bahas size chart
+      if (lastContext.includes('size') || lastContext.includes('lebar') || lastContext.includes('width')) {
+        return bot.sendMessage(chatId,
+          'Dari size chart ini, modelnya cenderung regular fit (normal).\n\n' +
+          '👉 Kalau mau oversize, naik 1 size dari ukuran yang direkomendasikan.'
+        );
+      }
+
+      // 👉 kalau tidak ada konteks
       return bot.sendMessage(chatId,
         'Oversize / boxy itu model lebih longgar dari ukuran normal.\n\n' +
         '👉 Saran:\n' +
         '- Mau pas → pakai size normal\n' +
-        '- Mau oversize → naik 1 size\n\n' +
-        'Contoh:\nXL → XXL'
+        '- Mau oversize → naik 1 size'
       );
     }
 
     // REGULAR
     if (text.includes('regular')) {
       return bot.sendMessage(chatId,
-        'Regular fit itu ukuran normal (tidak ketat & tidak longgar).\n' +
-        '👉 Gunakan size sesuai rekomendasi.'
-      );
-    }
-
-    // MODEL
-    if (text.includes('model')) {
-      return bot.sendMessage(chatId,
-        'Model kaos ini umumnya regular fit.\n' +
-        'Kalau mau lebih longgar, bisa pilih oversize (naik 1 size).'
+        'Regular fit itu ukuran normal (tidak terlalu ketat & tidak terlalu longgar).\n' +
+        '👉 Pakai size sesuai rekomendasi.'
       );
     }
 
     // ==================================================
-    // 🔥 SIZE DETECT (AKURAT)
+    // 🔥 SIZE LOGIC
     // ==================================================
     const match = text.match(/(\d+).*?(\d+)/);
 
@@ -119,7 +132,7 @@ bot.on('message', async (msg) => {
     }
 
     // ==================================================
-    // 🧠 MEMORY + AI (FALLBACK)
+    // 🧠 MEMORY + AI (fallback)
     // ==================================================
     if (!userMemory[userId]) userMemory[userId] = [];
 
@@ -137,7 +150,7 @@ bot.on('message', async (msg) => {
       messages: [
         {
           role: 'system',
-          content: 'Kamu admin toko baju. Jawab santai, singkat, dan fokus ke produk.'
+          content: 'Kamu admin toko baju. Jawab santai, singkat, dan fokus ke ukuran dan produk.'
         },
         ...userMemory[userId]
       ]
