@@ -24,7 +24,6 @@ bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
 
-    // ambil text atau caption
     const text = msg.text || msg.caption;
 
     // 🔒 hanya admin
@@ -32,20 +31,18 @@ bot.on('message', async (msg) => {
       return bot.sendMessage(chatId, '🔒 Bot ini private');
     }
 
-    // cek apakah ada gambar
     const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : null;
 
-    // kalau kosong semua
     if (!text && !photo) {
       return bot.sendMessage(chatId, '❗ Kirim text atau gambar + pertanyaan');
     }
 
-    // ⏳ loading
+    // loading
     const loadingMsg = await bot.sendMessage(chatId, '⏳ Lagi mikir...');
 
     let messages;
 
-    // 🔥 JIKA ADA GAMBAR → PAKAI VISION
+    // 🔥 MODE GAMBAR (VISION)
     if (photo) {
       const file = await bot.getFile(photo.file_id);
       const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
@@ -53,31 +50,46 @@ bot.on('message', async (msg) => {
       messages = [
         {
           role: 'system',
-          content: 'Kamu ahli membaca size chart pakaian dan memberi rekomendasi ukuran yang akurat.'
+          content: `
+Kamu adalah ahli size chart pakaian.
+
+TUGAS:
+- WAJIB baca tabel ukuran di gambar
+- Fokus ke angka (width, length, dll)
+- Jangan kasih teori umum
+
+ATURAN:
+- Jawaban singkat & langsung
+- Sebutkan size paling cocok (XL, XXL, dll)
+- Jelaskan singkat pakai data dari tabel
+- Jangan ngelantur
+
+Contoh:
+"BB 100kg tinggi 170cm cocok XXL karena width 63cm dan length 82cm lebih longgar dan aman."
+`
         },
         {
           role: 'user',
           content: [
             {
               type: 'text',
-              text: text || 'Analisa gambar ini'
+              text: (text || '') + ' (gunakan data tabel di gambar, jangan asal jawab)'
             },
             {
               type: 'image_url',
-              image_url: {
-                url: fileUrl
-              }
+              image_url: { url: fileUrl }
             }
           ]
         }
       ];
     } 
-    // 🔹 JIKA TEXT SAJA
+    
+    // 🔹 MODE TEXT
     else {
       messages = [
         {
           role: 'system',
-          content: 'Jawab singkat, jelas, dan santai.'
+          content: 'Jawab singkat, jelas, dan langsung ke poin.'
         },
         {
           role: 'user',
@@ -99,7 +111,6 @@ bot.on('message', async (msg) => {
       await bot.deleteMessage(chatId, loadingMsg.message_id);
     } catch (e) {}
 
-    // kirim jawaban
     await bot.sendMessage(chatId, reply);
 
   } catch (err) {
